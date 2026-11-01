@@ -2,14 +2,44 @@ import { useEffect, useState } from 'react'
 import ExcelJS from 'exceljs'
 import './App.css'
 
-// ========================================
-// Types
-// ========================================
+// ============================================================
+// HSG Game Manager
+// Version 5
+//
+// Economic rules:
+// - Blue duiker: 10 points = 10,000 FCFA
+// - Red duiker: 20 points = 20,000 FCFA
+// - Red river hog: 30 points = 30,000 FCFA
+// - 1 food point = 1,000 FCFA
+// - Annual food requirement: 50 points
+// - No Hunting: 0 FCFA
+// - Initial cash: 30,000 FCFA
+// - No bank loans
+// - Negative cash allowed
+// - One gift penalty if cash ever becomes negative
+//
+// Wildlife rules:
+// - Nearby: Blue 20, Red 10, Failure 20
+// - Distant: Red 20, Hog 10, Failure 20
+// - Annual regeneration: 50%
+// - Three draws per hunting action
+// ============================================================
 
-type Choice = '' | 'nearby' | 'distant' | 'agriculture'
+// ============================================================
+// Types
+// ============================================================
+
+type Choice = '' | 'nearby' | 'distant' | 'noHunting'
+
 type Scenario = 'OA' | 'PAM' | 'CBM'
+
 type Species = 'blue' | 'red' | 'hog'
-type Stage = 'round' | 'settlement' | 'regeneration' | 'finished'
+
+type Stage =
+  | 'round'
+  | 'settlement'
+  | 'regeneration'
+  | 'finished'
 
 type Population = {
   blue: number
@@ -52,30 +82,41 @@ type FinancialRecord = {
 type Game = {
   gameId: string
   scenario: Scenario
+
   players: number
-  initialMoney: number
   rounds: number
+  round: number
+
+  initialMoney: number
   fine: number
   travelCost: number
+
   regenerationRate: number
   foodRequirement: number
   drawsPerHunt: number
+
   failureTokens: FailureTokens
-  round: number
+
   actions: Action[]
   records: RoundRecord[]
+
   population: Population
   history: PopulationRecord[]
+
   cash: number[]
   financialHistory: FinancialRecord[]
+
   stage: Stage
 }
 
-// ========================================
+// ============================================================
 // Constants
-// ========================================
+// ============================================================
 
-const STORAGE = 'hsg-game-manager-v4'
+// Separate storage from the previous economic rules.
+const STORAGE = 'hsg-game-manager-v5'
+
+// New recommended initial settings.
 
 const DEFAULT_POPULATION: Population = {
   blue: 20,
@@ -89,6 +130,30 @@ const DEFAULT_FAILURE: FailureTokens = {
   distant: 20,
 }
 
+const DEFAULT_INITIAL_CASH = 30000
+
+const DEFAULT_REGENERATION_RATE = 50
+
+const DEFAULT_FOOD_REQUIREMENT = 50
+
+const DEFAULT_DRAWS_PER_HUNT = 3
+
+const DEFAULT_TRAVEL_COST = 0
+
+const DEFAULT_FINE = 20000
+
+// Food prices and values.
+
+const FOOD_PRICE = 1000
+
+const BLUE_POINTS = 10
+const RED_POINTS = 20
+const HOG_POINTS = 30
+
+const NO_HUNTING_INCOME = 0
+
+// Settings dropdowns.
+
 const TOKEN_OPTIONS = Array.from(
   { length: 7 },
   (_, i) => i * 5
@@ -99,113 +164,214 @@ const TENS = Array.from(
   (_, i) => i * 10
 )
 
+const CASH_OPTIONS = Array.from(
+  { length: 11 },
+  (_, i) => i * 10000
+)
+
+const TRAVEL_OPTIONS = [
+  0,
+  10000,
+  20000,
+  30000,
+  40000,
+  50000,
+]
+
+const FINE_OPTIONS = [
+  10000,
+  20000,
+  30000,
+  50000,
+  100000,
+]
+
+const ROUND_OPTIONS = Array.from(
+  { length: 10 },
+  (_, i) => (i + 1) * 4
+)
+
+const DRAW_OPTIONS = [1, 2, 3, 4, 5]
+
+// ============================================================
+// Formatting helpers
+// ============================================================
+
 const fmt = (n: number) =>
   `${n.toLocaleString('en-US')} FCFA`
 
-const blank = (): Action => ({
-  choice: '',
-  blue: 0,
-  red: 0,
-  hog: 0,
-  arrested: false,
-})
+function blank(): Action {
+  return {
+    choice: '',
+    blue: 0,
+    red: 0,
+    hog: 0,
+    arrested: false,
+  }
+}
 
-const blanks = (n: number) =>
-  Array.from({ length: n }, blank)
+function blanks(n: number): Action[] {
+  return Array.from(
+    { length: n },
+    () => blank()
+  )
+}
 
-const caught = (a: Action) =>
-  a.blue + a.red + a.hog
+function caught(a: Action): number {
+  return a.blue + a.red + a.hog
+}
 
-const foodPoints = (a: Action) =>
-  10 * a.blue + 20 * a.red + 30 * a.hog
+function foodPoints(a: Action): number {
+  return (
+    BLUE_POINTS * a.blue +
+    RED_POINTS * a.red +
+    HOG_POINTS * a.hog
+  )
+}
 
-const actionCash = (a: Action, g: Game) =>
-  a.choice === 'agriculture'
-    ? 30000
-    : a.choice === 'distant'
-      ? -g.travelCost - (a.arrested ? g.fine : 0)
-      : 0
+function choiceLabel(choice: Choice): string {
+  switch (choice) {
+    case 'nearby':
+      return 'Nearby Hunting'
 
-const wildlifeRows = [
-  { key: 'blue', name: 'Nearby — Blue duiker' },
-  { key: 'nearRed', name: 'Nearby — Red duiker' },
-  { key: 'farRed', name: 'Distant — Red duiker' },
-  { key: 'hog', name: 'Distant — Red river hog' },
-] as const
+    case 'distant':
+      return 'Distant Hunting'
 
-// ========================================
-// Distant hunting affordability
+    case 'noHunting':
+      return 'No Hunting'
+
+    default:
+      return ''
+  }
+}
+
+// ============================================================
+// Financial calculations
+// ============================================================
+
+function actionCash(
+  a: Action,
+  g: Game
+): number {
+  if (a.choice === 'noHunting') {
+    return NO_HUNTING_INCOME
+  }
+
+  if (a.choice === 'distant') {
+    const travel = g.travelCost
+
+    const fine =
+      a.arrested ? g.fine : 0
+
+    return -(travel + fine)
+  }
+
+  return 0
+}
+
+// Distant hunting is restricted only if
+// its preparation cost is positive.
 //
-// FIX:
-// If travel cost is zero, distant hunting
-// is allowed regardless of cash balance.
-//
-// If travel cost is greater than zero,
-// the player must have enough cash.
-// ========================================
+// If preparation cost = 0 FCFA,
+// negative cash does not prevent hunting.
 
 function cannotAffordDistantHunting(
   cash: number,
   travelCost: number
 ): boolean {
-  return travelCost > 0 && cash < travelCost
+  return (
+    travelCost > 0 &&
+    cash < travelCost
+  )
 }
 
-// ========================================
-// Wildlife population calculations
-// ========================================
+// ============================================================
+// Wildlife calculations
+// ============================================================
+
+const wildlifeRows = [
+  {
+    key: 'blue',
+    name: 'Nearby — Blue duiker',
+  },
+  {
+    key: 'nearRed',
+    name: 'Nearby — Red duiker',
+  },
+  {
+    key: 'farRed',
+    name: 'Distant — Red duiker',
+  },
+  {
+    key: 'hog',
+    name: 'Distant — Red river hog',
+  },
+] as const
 
 function subtract(
-  p: Population,
-  a: Action
+  population: Population,
+  action: Action
 ): Population {
-  const q = { ...p }
+  const p = { ...population }
 
-  if (!a.arrested && a.choice === 'nearby') {
-    q.blue -= a.blue
-    q.nearRed -= a.red
+  if (
+    action.choice === 'nearby' &&
+    !action.arrested
+  ) {
+    p.blue -= action.blue
+    p.nearRed -= action.red
   }
 
-  if (!a.arrested && a.choice === 'distant') {
-    q.farRed -= a.red
-    q.hog -= a.hog
+  if (
+    action.choice === 'distant' &&
+    !action.arrested
+  ) {
+    p.farRed -= action.red
+    p.hog -= action.hog
   }
 
-  return q
+  return p
 }
 
-function grow(
-  p: Population,
+function growth(
+  population: Population,
   rate: number
 ): Population {
-  const f = rate / 100
+  const r = rate / 100
 
   return {
-    blue: Math.floor(p.blue * f),
-    nearRed: Math.floor(p.nearRed * f),
-    farRed: Math.floor(p.farRed * f),
-    hog: Math.floor(p.hog * f),
+    blue: Math.floor(population.blue * r),
+
+    nearRed: Math.floor(
+      population.nearRed * r
+    ),
+
+    farRed: Math.floor(
+      population.farRed * r
+    ),
+
+    hog: Math.floor(population.hog * r),
   }
 }
 
-function add(
+function addPopulations(
   a: Population,
   b: Population
 ): Population {
   return {
     blue: a.blue + b.blue,
+
     nearRed: a.nearRed + b.nearRed,
+
     farRed: a.farRed + b.farRed,
+
     hog: a.hog + b.hog,
   }
 }
 
-// ========================================
+// ============================================================
 // Annual food settlement
-//
-// No bank loans or repayments.
-// Negative balances are allowed.
-// ========================================
+// ============================================================
 
 function settlement(
   g: Game
@@ -217,38 +383,42 @@ function settlement(
     (_, i) => {
       const food = g.records
         .filter(
-          r => Math.ceil(r.round / 4) === year
+          record =>
+            Math.ceil(record.round / 4) ===
+            year
         )
         .reduce(
-          (sum, r) =>
-            sum + foodPoints(r.actions[i]),
+          (sum, record) =>
+            sum +
+            foodPoints(record.actions[i]),
           0
         )
 
       const foodTransaction =
-        (food - g.foodRequirement) * 3000
+        (food - g.foodRequirement) *
+        FOOD_PRICE
 
       return {
         year,
         player: i + 1,
         food,
         foodTransaction,
-        cash: g.cash[i] + foodTransaction,
+        cash:
+          g.cash[i] + foodTransaction,
       }
     }
   )
 }
 
-// ========================================
-// Financial history reconstruction
+// ============================================================
+// Reconstruct financial history
 //
-// Negative balance at least once:
-// ONE penalty only, regardless of frequency.
+// This is also used for gift penalties.
 //
-// The penalty is reconstructed from
-// confirmed records, so editing the last
-// round also updates the result.
-// ========================================
+// A player receives only one negative-cash
+// penalty even if the balance becomes
+// negative multiple times.
+// ============================================================
 
 function replay(
   g: Game,
@@ -269,17 +439,19 @@ function replay(
   >()
 
   for (const f of finances) {
-    const group = settled.get(f.year) ?? []
+    const group =
+      settled.get(f.year) ?? []
 
     group.push(f)
+
     settled.set(f.year, group)
   }
 
-  for (
-    const record of [...records].sort(
-      (a, b) => a.round - b.round
-    )
-  ) {
+  const sortedRecords = [...records].sort(
+    (a, b) => a.round - b.round
+  )
+
+  for (const record of sortedRecords) {
     for (
       let i = 0;
       i < g.players;
@@ -296,17 +468,20 @@ function replay(
     }
 
     if (record.round % 4 === 0) {
-      for (
-        const f of
-        settled.get(record.round / 4) ?? []
-      ) {
+      const year = record.round / 4
+
+      const rows =
+        settled.get(year) ?? []
+
+      for (const f of rows) {
         const i = f.player - 1
 
         if (
           i >= 0 &&
           i < g.players
         ) {
-          cash[i] += f.foodTransaction
+          cash[i] +=
+            f.foodTransaction
 
           if (cash[i] < 0) {
             everNegative[i] = true
@@ -322,117 +497,145 @@ function replay(
   }
 }
 
-// ========================================
+// ============================================================
 // Final population before regeneration
-// ========================================
+// ============================================================
 
 function finalBeforeGrowth(
   g: Game
 ): Population {
-  const year = g.rounds / 4
+  const finalYear = g.rounds / 4
 
   const start = g.history.find(
-    h => h.year === year
+    h => h.year === finalYear
   )
 
   if (!start) {
     return { ...g.population }
   }
 
-  let p = { ...start.population }
+  let population = {
+    ...start.population,
+  }
 
-  for (
-    const r of g.records.filter(
-      r => Math.ceil(r.round / 4) === year
-    )
-  ) {
-    for (const a of r.actions) {
-      p = subtract(p, a)
+  const finalRecords = g.records.filter(
+    r =>
+      Math.ceil(r.round / 4) ===
+      finalYear
+  )
+
+  for (const record of finalRecords) {
+    for (const action of record.actions) {
+      population = subtract(
+        population,
+        action
+      )
     }
   }
 
-  return p
+  return population
 }
 
-// ========================================
+// ============================================================
 // Gift rewards
-// ========================================
+// ============================================================
 
 function rewards(g: Game) {
-  const negative = replay(
+  const reconstructed = replay(
     g,
     g.records,
     g.financialHistory
-  ).everNegative
+  )
 
-  const finalPopulation = finalBeforeGrowth(g)
+  const negative =
+    reconstructed.everNegative
+
+  const finalPopulation =
+    finalBeforeGrowth(g)
 
   const wildlife = Object.values(
     finalPopulation
-  ).every(x => x > 0)
+  ).every(n => n > 0)
 
   const highest = Math.max(...g.cash)
 
-  const rows = g.cash.map((cash, i) => {
-    const participation = 1
+  const rows = g.cash.map(
+    (cash, i) => {
+      const participation = 1
 
-    const wildlifeBonus =
-      wildlife ? 1 : 0
+      const wildlifeBonus =
+        wildlife ? 1 : 0
 
-    const negativePenalty =
-      negative[i] ? -1 : 0
+      const negativePenalty =
+        negative[i] ? -1 : 0
 
-    const highestBonus =
-      cash === highest ? 1 : 0
+      const highestBonus =
+        cash === highest ? 1 : 0
 
-    const total = Math.max(
-      0,
-      participation +
-        wildlifeBonus +
-        negativePenalty +
-        highestBonus
-    )
+      const total = Math.max(
+        0,
+        participation +
+          wildlifeBonus +
+          negativePenalty +
+          highestBonus
+      )
 
-    return {
-      player: i + 1,
-      participation,
-      wildlifeBonus,
-      negativePenalty,
-      highestBonus,
-      everNegative: negative[i],
-      finalCash: cash,
-      total,
+      return {
+        player: i + 1,
+
+        participation,
+
+        wildlifeBonus,
+
+        negativePenalty,
+
+        highestBonus,
+
+        everNegative: negative[i],
+
+        finalCash: cash,
+
+        total,
+      }
     }
-  })
+  )
+
+  const total = rows.reduce(
+    (sum, row) => sum + row.total,
+    0
+  )
 
   return {
     rows,
     wildlife,
     finalPopulation,
-    total: rows.reduce(
-      (s, r) => s + r.total,
-      0
-    ),
+    total,
   }
 }
 
-// ========================================
+// ============================================================
 // Excel export
-// ========================================
+// Five worksheets
+// ============================================================
 
 async function exportExcel(g: Game) {
   try {
-    const w = new ExcelJS.Workbook()
+    const workbook =
+      new ExcelJS.Workbook()
 
-    w.creator = 'HSG Game Manager'
+    workbook.creator =
+      'HSG Game Manager'
 
+    // --------------------------------------------------------
     // Sheet 1: Round Decisions
+    // --------------------------------------------------------
 
-    const rounds = w.addWorksheet(
-      'Round Decisions'
-    )
+    const decisions =
+      workbook.addWorksheet(
+        'Round Decisions'
+      )
 
-    rounds.addRow([
+    decisions.addRow([
       'Game ID',
       'Scenario',
       'Round',
@@ -447,58 +650,70 @@ async function exportExcel(g: Game) {
       'Cash change (FCFA)',
     ])
 
-    g.records.forEach(r =>
-      r.actions.forEach((a, i) =>
-        rounds.addRow([
-          g.gameId,
-          g.scenario,
-          r.round,
-          Math.ceil(r.round / 4),
-          i + 1,
-          a.choice,
-          a.arrested,
-          a.blue,
-          a.red,
-          a.hog,
-          foodPoints(a),
-          actionCash(a, g),
-        ])
+    g.records.forEach(record => {
+      record.actions.forEach(
+        (action, i) => {
+          decisions.addRow([
+            g.gameId,
+            g.scenario,
+            record.round,
+            Math.ceil(record.round / 4),
+            i + 1,
+            choiceLabel(action.choice),
+            action.arrested,
+            action.blue,
+            action.red,
+            action.hog,
+            foodPoints(action),
+            actionCash(action, g),
+          ])
+        }
       )
-    )
+    })
 
+    // --------------------------------------------------------
     // Sheet 2: Annual Finances
+    // --------------------------------------------------------
 
-    const finances = w.addWorksheet(
-      'Annual Finances'
-    )
+    const finances =
+      workbook.addWorksheet(
+        'Annual Finances'
+      )
 
     finances.addRow([
       'Game ID',
       'Year',
       'Player',
       'Food points',
-      'Food sale/purchase (FCFA)',
+      'Required food points',
+      'Food transaction (FCFA)',
       'Year-end cash (FCFA)',
       'Negative year-end balance',
     ])
 
-    g.financialHistory.forEach(r =>
-      finances.addRow([
-        g.gameId,
-        r.year,
-        r.player,
-        r.food,
-        r.foodTransaction,
-        r.cash,
-        r.cash < 0,
-      ])
+    g.financialHistory.forEach(
+      record => {
+        finances.addRow([
+          g.gameId,
+          record.year,
+          record.player,
+          record.food,
+          g.foodRequirement,
+          record.foodTransaction,
+          record.cash,
+          record.cash < 0,
+        ])
+      }
     )
 
+    // --------------------------------------------------------
     // Sheet 3: Wildlife Populations
+    // --------------------------------------------------------
 
-    const populations = w.addWorksheet(
-      'Wildlife Populations'
-    )
+    const populations =
+      workbook.addWorksheet(
+        'Wildlife Populations'
+      )
 
     populations.addRow([
       'Game ID',
@@ -509,101 +724,173 @@ async function exportExcel(g: Game) {
       'Distant red river hog',
     ])
 
-    g.history.forEach(r =>
+    g.history.forEach(record => {
       populations.addRow([
         g.gameId,
-        r.year,
-        r.population.blue,
-        r.population.nearRed,
-        r.population.farRed,
-        r.population.hog,
+        record.year,
+        record.population.blue,
+        record.population.nearRed,
+        record.population.farRed,
+        record.population.hog,
       ])
-    )
+    })
 
+    // --------------------------------------------------------
     // Sheet 4: Game Settings
+    // --------------------------------------------------------
 
-    const settings = w.addWorksheet(
-      'Game Settings'
-    )
+    const settings =
+      workbook.addWorksheet(
+        'Game Settings'
+      )
 
     settings.addRow([
       'Parameter',
       'Value',
     ])
 
-    const p = g.history[0].population
+    const initial =
+      g.history[0].population
 
     const settingRows: [
       string,
       string | number
     ][] = [
-      ['Game ID', g.gameId],
-      ['Scenario', g.scenario],
-      ['Number of players', g.players],
-      ['Initial cash (FCFA)', g.initialMoney],
-      ['Number of rounds', g.rounds],
+      [
+        'Game ID',
+        g.gameId,
+      ],
+
+      [
+        'Scenario',
+        g.scenario,
+      ],
+
+      [
+        'Number of players',
+        g.players,
+      ],
+
+      [
+        'Number of rounds',
+        g.rounds,
+      ],
+
+      [
+        'Initial cash (FCFA)',
+        g.initialMoney,
+      ],
+
       [
         'Distant hunting cost (FCFA)',
         g.travelCost,
       ],
+
       [
         'PAM fine (FCFA)',
         g.scenario === 'PAM'
           ? g.fine
           : 'N/A',
       ],
+
       [
         'Annual regeneration rate (%)',
         g.regenerationRate,
       ],
+
       [
-        'Food requirement (points/player/year)',
+        'Annual food requirement',
         g.foodRequirement,
       ],
-      ['Draws per hunt', g.drawsPerHunt],
-      ['Nearby blue duiker', p.blue],
-      ['Nearby red duiker', p.nearRed],
+
+      [
+        'Food price per point (FCFA)',
+        FOOD_PRICE,
+      ],
+
+      [
+        'Draws per hunt',
+        g.drawsPerHunt,
+      ],
+
+      [
+        'Blue duiker food points',
+        BLUE_POINTS,
+      ],
+
+      [
+        'Red duiker food points',
+        RED_POINTS,
+      ],
+
+      [
+        'Red river hog food points',
+        HOG_POINTS,
+      ],
+
+      [
+        'Nearby blue duiker',
+        initial.blue,
+      ],
+
+      [
+        'Nearby red duiker',
+        initial.nearRed,
+      ],
+
       [
         'Nearby failure tokens',
         g.failureTokens.nearby,
       ],
-      ['Distant red duiker', p.farRed],
-      ['Distant red river hog', p.hog],
+
+      [
+        'Distant red duiker',
+        initial.farRed,
+      ],
+
+      [
+        'Distant red river hog',
+        initial.hog,
+      ],
+
       [
         'Distant failure tokens',
         g.failureTokens.distant,
       ],
+
       [
-        'Part-time job income (FCFA)',
-        30000,
+        'No Hunting income (FCFA)',
+        NO_HUNTING_INCOME,
       ],
-      [
-        'Food price per point (FCFA)',
-        3000,
-      ],
+
       [
         'Negative balance rule',
-        'No bank loans; negative cash allowed',
+        'Negative cash allowed; no bank loans',
       ],
+
       [
         'Gift penalty',
         'Minus one if cash was negative at least once',
       ],
+
       [
         'Distant hunting restriction',
-        'Cash requirement applies only if travel cost is positive',
+        'Positive travel cost requires sufficient cash',
       ],
     ]
 
-    settingRows.forEach(row =>
-      settings.addRow(row)
+    settingRows.forEach(
+      row => settings.addRow(row)
     )
 
+    // --------------------------------------------------------
     // Sheet 5: Gift Rewards
+    // --------------------------------------------------------
 
-    const gifts = w.addWorksheet(
-      'Gift Rewards'
-    )
+    const gifts =
+      workbook.addWorksheet(
+        'Gift Rewards'
+      )
 
     gifts.addRow([
       'Game ID',
@@ -620,20 +907,20 @@ async function exportExcel(g: Game) {
 
     const summary = rewards(g)
 
-    summary.rows.forEach(r =>
+    summary.rows.forEach(row => {
       gifts.addRow([
         g.gameId,
-        r.player,
-        r.participation,
-        r.wildlifeBonus,
-        r.negativePenalty,
-        r.highestBonus,
-        r.total,
-        r.everNegative,
-        r.finalCash,
+        row.player,
+        row.participation,
+        row.wildlifeBonus,
+        row.negativePenalty,
+        row.highestBonus,
+        row.total,
+        row.everNegative,
+        row.finalCash,
         summary.wildlife,
       ])
-    )
+    })
 
     gifts.addRow([])
 
@@ -641,31 +928,33 @@ async function exportExcel(g: Game) {
       'Final population before regeneration',
     ])
 
-    wildlifeRows.forEach(r =>
+    wildlifeRows.forEach(row => {
       gifts.addRow([
-        r.name,
-        summary.finalPopulation[r.key],
+        row.name,
+        summary.finalPopulation[row.key],
       ])
-    )
+    })
 
     gifts.addRow([
       'Total gifts required',
       summary.total,
     ])
 
-    // Formatting
+    // --------------------------------------------------------
+    // Excel formatting
+    // --------------------------------------------------------
 
-    w.worksheets.forEach(s => {
-      const h = s.getRow(1)
+    workbook.worksheets.forEach(sheet => {
+      const header = sheet.getRow(1)
 
-      h.font = {
+      header.font = {
         bold: true,
         color: {
           argb: 'FFFFFFFF',
         },
       }
 
-      h.fill = {
+      header.fill = {
         type: 'pattern',
         pattern: 'solid',
         fgColor: {
@@ -673,66 +962,82 @@ async function exportExcel(g: Game) {
         },
       }
 
-      h.alignment = {
+      header.alignment = {
         vertical: 'middle',
         wrapText: true,
       }
 
-      h.height = 40
+      header.height = 40
 
-      s.views = [
+      sheet.views = [
         {
           state: 'frozen',
           ySplit: 1,
         },
       ]
 
-      s.columns.forEach(c => {
-        c.width = 23
+      sheet.columns.forEach(column => {
+        column.width = 23
       })
 
-      if (s.name === 'Game Settings') {
-        s.getColumn(1).width = 46
+      if (
+        sheet.name === 'Game Settings'
+      ) {
+        sheet.getColumn(1).width = 46
       }
 
-      s.eachRow((r, number) => {
-        if (
-          number > 1 &&
-          number % 2 === 0
-        ) {
-          r.fill = {
-            type: 'pattern',
-            pattern: 'solid',
-            fgColor: {
-              argb: 'FFF2F7F3',
-            },
+      sheet.eachRow(
+        (row, number) => {
+          if (
+            number > 1 &&
+            number % 2 === 0
+          ) {
+            row.fill = {
+              type: 'pattern',
+              pattern: 'solid',
+              fgColor: {
+                argb: 'FFF2F7F3',
+              },
+            }
           }
         }
-      })
+      )
 
-      if (s.name !== 'Game Settings') {
-        s.autoFilter = {
+      if (
+        sheet.name !== 'Game Settings'
+      ) {
+        sheet.autoFilter = {
           from: {
             row: 1,
             column: 1,
           },
+
           to: {
             row: 1,
-            column: s.columnCount,
+            column: sheet.columnCount,
           },
         }
       }
     })
 
-    const data = await w.xlsx.writeBuffer()
+    // --------------------------------------------------------
+    // Create and download Excel
+    // --------------------------------------------------------
 
-    const copy = new Uint8Array(data)
+    const data =
+      await workbook.xlsx.writeBuffer()
 
-    const buffer = new ArrayBuffer(
-      copy.byteLength
+    const bytes = new Uint8Array(
+      data
     )
 
-    new Uint8Array(buffer).set(copy)
+    const buffer = new ArrayBuffer(
+      bytes.byteLength
+    )
+
+    new Uint8Array(buffer).set(
+      bytes
+    )
 
     const blob = new Blob(
       [buffer],
@@ -743,28 +1048,37 @@ async function exportExcel(g: Game) {
       }
     )
 
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
+    const url =
+      URL.createObjectURL(blob)
+
+    const link =
+      document.createElement('a')
 
     link.href = url
 
-    link.download = `${
+    const safeGameId =
       g.gameId.replace(
         /[^a-zA-Z0-9_-]/g,
         '_'
       ) || 'HSG'
-    }.xlsx`
 
-    document.body.appendChild(link)
+    link.download =
+      `${safeGameId}.xlsx`
+
+    document.body.appendChild(
+      link
+    )
+
     link.click()
+
     link.remove()
 
     setTimeout(
       () => URL.revokeObjectURL(url),
       1000
     )
-  } catch (e) {
-    console.error(e)
+  } catch (error) {
+    console.error(error)
 
     window.alert(
       'Excel export failed.'
@@ -772,9 +1086,9 @@ async function exportExcel(g: Game) {
   }
 }
 
-// ========================================
+// ============================================================
 // Population table
-// ========================================
+// ============================================================
 
 function PopulationTable({
   population,
@@ -789,23 +1103,29 @@ function PopulationTable({
         <thead>
           <tr>
             <th>Area / Species</th>
+
             <th>Animals</th>
-            {increase && <th>To add</th>}
+
+            {increase && (
+              <th>To add</th>
+            )}
           </tr>
         </thead>
 
         <tbody>
-          {wildlifeRows.map(a => (
-            <tr key={a.key}>
-              <td>{a.name}</td>
+          {wildlifeRows.map(row => (
+            <tr key={row.key}>
+              <td>
+                {row.name}
+              </td>
 
               <td>
-                {population[a.key]}
+                {population[row.key]}
               </td>
 
               {increase && (
                 <td>
-                  +{increase[a.key]}
+                  +{increase[row.key]}
                 </td>
               )}
             </tr>
@@ -816,9 +1136,9 @@ function PopulationTable({
   )
 }
 
-// ========================================
+// ============================================================
 // Population graph
-// ========================================
+// ============================================================
 
 function Graph({
   history,
@@ -858,9 +1178,9 @@ function Graph({
 
   const maximum = Math.max(
     10,
-    ...history.flatMap(r =>
-      series.map(s =>
-        r.population[s.key]
+    ...history.flatMap(record =>
+      series.map(
+        s => record.population[s.key]
       )
     )
   )
@@ -868,10 +1188,8 @@ function Graph({
   const top =
     Math.ceil(maximum / 10) * 10
 
-  const count = Math.max(
-    2,
-    years + 1
-  )
+  const count =
+    Math.max(2, years + 1)
 
   const x = (year: number) =>
     42 +
@@ -894,39 +1212,41 @@ function Graph({
         role="img"
         aria-label={`${area} population trend`}
       >
-        {[0, 0.25, 0.5, 0.75, 1].map(v => (
-          <g key={v}>
-            <line
-              x1="42"
-              x2="332"
-              y1={y(v * top)}
-              y2={y(v * top)}
-              stroke="#e5e7eb"
-            />
+        {[0, 0.25, 0.5, 0.75, 1].map(
+          value => (
+            <g key={value}>
+              <line
+                x1="42"
+                x2="332"
+                y1={y(value * top)}
+                y2={y(value * top)}
+                stroke="#e5e7eb"
+              />
 
-            <text
-              x="36"
-              y={y(v * top) + 4}
-              textAnchor="end"
-              fontSize="11"
-            >
-              {Math.round(v * top)}
-            </text>
-          </g>
-        ))}
+              <text
+                x="36"
+                y={y(value * top) + 4}
+                textAnchor="end"
+                fontSize="11"
+              >
+                {Math.round(value * top)}
+              </text>
+            </g>
+          )
+        )}
 
         {Array.from(
           { length: count },
           (_, i) => i + 1
-        ).map(yr => (
+        ).map(year => (
           <text
-            key={yr}
-            x={x(yr)}
+            key={year}
+            x={x(year)}
             y="210"
             textAnchor="middle"
             fontSize="11"
           >
-            {yr}
+            {year}
           </text>
         ))}
 
@@ -938,28 +1258,28 @@ function Graph({
               strokeWidth="3"
               points={history
                 .map(
-                  r =>
-                    `${x(r.year)},${y(
-                      r.population[s.key]
+                  record =>
+                    `${x(record.year)},${y(
+                      record.population[s.key]
                     )}`
                 )
                 .join(' ')}
             />
 
-            {history.map(r => (
+            {history.map(record => (
               <circle
-                key={r.year}
-                cx={x(r.year)}
+                key={record.year}
+                cx={x(record.year)}
                 cy={y(
-                  r.population[s.key]
+                  record.population[s.key]
                 )}
                 r="4"
                 fill={s.color}
               >
                 <title>
-                  {s.name}: Year {r.year}
+                  {s.name}: Year {record.year}
                   {' — '}
-                  {r.population[s.key]}
+                  {record.population[s.key]}
                 </title>
               </circle>
             ))}
@@ -985,6 +1305,7 @@ function Graph({
                 backgroundColor: s.color,
               }}
             />
+
             {s.name}
           </span>
         ))}
@@ -992,6 +1313,10 @@ function Graph({
     </div>
   )
 }
+
+// ============================================================
+// Wildlife monitoring
+// ============================================================
 
 function Monitoring({
   history,
@@ -1007,7 +1332,8 @@ function Monitoring({
       </h2>
 
       <p className="muted">
-        Populations at the beginning of each year.
+        Populations at the beginning
+        of each year.
       </p>
 
       <Graph
@@ -1025,20 +1351,23 @@ function Monitoring({
   )
 }
 
-// ========================================
+// ============================================================
 // Excel export panel
-// ========================================
+// ============================================================
 
 function ExportPanel({
   game,
 }: {
   game: Game
 }) {
-  const [busy, setBusy] = useState(false)
+  const [busy, setBusy] =
+    useState(false)
 
   return (
     <section className="card">
-      <h2>Export Research Data</h2>
+      <h2>
+        Export Research Data
+      </h2>
 
       <p className="muted">
         Five worksheets in one Excel workbook.
@@ -1065,9 +1394,9 @@ function ExportPanel({
   )
 }
 
-// ========================================
+// ============================================================
 // Gift rewards panel
-// ========================================
+// ============================================================
 
 function GiftPanel({
   game,
@@ -1089,16 +1418,20 @@ function GiftPanel({
       </p>
 
       <p className="muted">
-        Wildlife evaluated before final regeneration.
-        Negative cash incurs a one-time penalty,
-        even if subsequently recovered.
+        Wildlife is evaluated before
+        final regeneration.
+        Negative cash incurs a one-time
+        penalty, even if subsequently
+        recovered.
       </p>
 
       <PopulationTable
         population={summary.finalPopulation}
       />
 
-      <h3>Rewards by Player</h3>
+      <h3>
+        Rewards by Player
+      </h3>
 
       <div className="table-container">
         <table className="population-table">
@@ -1114,31 +1447,31 @@ function GiftPanel({
           </thead>
 
           <tbody>
-            {summary.rows.map(r => (
-              <tr key={r.player}>
+            {summary.rows.map(row => (
+              <tr key={row.player}>
                 <td>
-                  Player {r.player}
+                  Player {row.player}
                 </td>
 
                 <td>
-                  +{r.participation}
+                  +{row.participation}
                 </td>
 
                 <td>
-                  +{r.wildlifeBonus}
+                  +{row.wildlifeBonus}
                 </td>
 
                 <td>
-                  {r.negativePenalty}
+                  {row.negativePenalty}
                 </td>
 
                 <td>
-                  +{r.highestBonus}
+                  +{row.highestBonus}
                 </td>
 
                 <td>
                   <strong>
-                    {r.total}
+                    {row.total}
                   </strong>
                 </td>
               </tr>
@@ -1148,60 +1481,83 @@ function GiftPanel({
       </div>
 
       <h3>
-        Total Gifts Required: {summary.total}
+        Total Gifts Required:
+        {' '}{summary.total}
       </h3>
     </section>
   )
 }
 
-// ========================================
+// ============================================================
 // Main application
-// ========================================
+// ============================================================
 
 function App() {
-  // New-game settings
 
-  const [id, setId] = useState('HSG-001')
+  // ----------------------------------------------------------
+  // New game settings
+  // ----------------------------------------------------------
+
+  const [id, setId] =
+    useState('HSG-001')
 
   const [scenario, setScenario] =
     useState<Scenario>('OA')
 
-  const [players, setPlayers] = useState(4)
+  const [players, setPlayers] =
+    useState(4)
 
   const [initialMoney, setInitialMoney] =
-    useState(0)
+    useState(DEFAULT_INITIAL_CASH)
 
-  const [rounds, setRounds] = useState(20)
+  const [rounds, setRounds] =
+    useState(20)
 
-  const [fine, setFine] = useState(50000)
+  const [fine, setFine] =
+    useState(DEFAULT_FINE)
 
   const [travelCost, setTravelCost] =
-    useState(0)
+    useState(DEFAULT_TRAVEL_COST)
 
-  const [regenerationRate, setRegenerationRate] =
-    useState(50)
+  const [
+    regenerationRate,
+    setRegenerationRate,
+  ] = useState(
+    DEFAULT_REGENERATION_RATE
+  )
 
-  const [foodRequirement, setFoodRequirement] =
-    useState(50)
+  const [
+    foodRequirement,
+    setFoodRequirement,
+  ] = useState(
+    DEFAULT_FOOD_REQUIREMENT
+  )
 
-  const [drawsPerHunt, setDrawsPerHunt] =
-    useState(3)
+  const [
+    drawsPerHunt,
+    setDrawsPerHunt,
+  ] = useState(
+    DEFAULT_DRAWS_PER_HUNT
+  )
 
   const [initialPop, setInitialPop] =
     useState<Population>({
       ...DEFAULT_POPULATION,
     })
 
-  const [failureTokens, setFailureTokens] =
-    useState<FailureTokens>({
-      ...DEFAULT_FAILURE,
-    })
+  const [
+    failureTokens,
+    setFailureTokens,
+  ] = useState<FailureTokens>({
+    ...DEFAULT_FAILURE,
+  })
 
   const [showGraphs, setShowGraphs] =
     useState(false)
 
-  // Keep the existing v4 storage key.
-  // Existing game data is preserved.
+  // ----------------------------------------------------------
+  // Load saved game
+  // ----------------------------------------------------------
 
   const [game, setGame] =
     useState<Game | null>(() => {
@@ -1209,7 +1565,9 @@ function App() {
         const text =
           localStorage.getItem(STORAGE)
 
-        if (!text) return null
+        if (!text) {
+          return null
+        }
 
         return JSON.parse(text) as Game
       } catch {
@@ -1217,7 +1575,9 @@ function App() {
       }
     })
 
+  // ----------------------------------------------------------
   // Autosave
+  // ----------------------------------------------------------
 
   useEffect(() => {
     if (game) {
@@ -1226,23 +1586,46 @@ function App() {
         JSON.stringify(game)
       )
     } else {
-      localStorage.removeItem(STORAGE)
+      localStorage.removeItem(
+        STORAGE
+      )
     }
   }, [game])
 
-  // Reset new-game settings
+  // ----------------------------------------------------------
+  // Reset settings
+  // ----------------------------------------------------------
 
   function resetSettings() {
     setId('HSG-001')
+
     setScenario('OA')
+
     setPlayers(4)
-    setInitialMoney(0)
+
+    setInitialMoney(
+      DEFAULT_INITIAL_CASH
+    )
+
     setRounds(20)
-    setFine(50000)
-    setTravelCost(0)
-    setRegenerationRate(50)
-    setFoodRequirement(50)
-    setDrawsPerHunt(3)
+
+    setFine(DEFAULT_FINE)
+
+    setTravelCost(
+      DEFAULT_TRAVEL_COST
+    )
+
+    setRegenerationRate(
+      DEFAULT_REGENERATION_RATE
+    )
+
+    setFoodRequirement(
+      DEFAULT_FOOD_REQUIREMENT
+    )
+
+    setDrawsPerHunt(
+      DEFAULT_DRAWS_PER_HUNT
+    )
 
     setInitialPop({
       ...DEFAULT_POPULATION,
@@ -1255,47 +1638,51 @@ function App() {
     setShowGraphs(false)
   }
 
+  // ----------------------------------------------------------
   // Start game
+  // ----------------------------------------------------------
 
   function start() {
-    if (
-      !id.trim() ||
-      !Number.isInteger(players) ||
-      players < 2 ||
-      players > 10 ||
-      initialMoney < 0 ||
-      initialMoney > 100000 ||
-      initialMoney % 10000 !== 0 ||
-      travelCost < 0 ||
-      travelCost > 50000 ||
-      travelCost % 10000 !== 0 ||
-      rounds < 4 ||
-      rounds > 40 ||
-      rounds % 4 !== 0 ||
-      !TENS.includes(regenerationRate) ||
-      !TENS.includes(foodRequirement) ||
-      ![1, 2, 3, 4, 5].includes(drawsPerHunt) ||
-      Object.values(initialPop).some(
-        n => !TOKEN_OPTIONS.includes(n)
-      ) ||
-      Object.values(failureTokens).some(
-        n => !TOKEN_OPTIONS.includes(n)
+    const valid =
+      id.trim().length > 0 &&
+      Number.isInteger(players) &&
+      players >= 2 &&
+      players <= 10 &&
+      CASH_OPTIONS.includes(initialMoney) &&
+      TRAVEL_OPTIONS.includes(travelCost) &&
+      ROUND_OPTIONS.includes(rounds) &&
+      FINE_OPTIONS.includes(fine) &&
+      TENS.includes(regenerationRate) &&
+      TENS.includes(foodRequirement) &&
+      DRAW_OPTIONS.includes(drawsPerHunt) &&
+      Object.values(initialPop).every(
+        n => TOKEN_OPTIONS.includes(n)
+      ) &&
+      Object.values(failureTokens).every(
+        n => TOKEN_OPTIONS.includes(n)
       )
-    ) {
+
+    if (!valid) {
       window.alert(
         'Please check the game settings.'
       )
+
       return
     }
 
     setGame({
       gameId: id.trim(),
+
       scenario,
+
       players,
-      initialMoney,
       rounds,
+      round: 1,
+
+      initialMoney,
       fine,
       travelCost,
+
       regenerationRate,
       foodRequirement,
       drawsPerHunt,
@@ -1304,8 +1691,8 @@ function App() {
         ...failureTokens,
       },
 
-      round: 1,
       actions: blanks(players),
+
       records: [],
 
       population: {
@@ -1315,25 +1702,26 @@ function App() {
       history: [
         {
           year: 1,
+
           population: {
             ...initialPop,
           },
         },
       ],
 
-      cash: Array(players).fill(initialMoney),
+      cash: Array(players).fill(
+        initialMoney
+      ),
+
       financialHistory: [],
+
       stage: 'round',
     })
   }
 
-  // ======================================
-  // Change player choice
-  //
-  // FIX:
-  // Zero travel cost allows distant
-  // hunting even with negative cash.
-  // ======================================
+  // ----------------------------------------------------------
+  // Choose action
+  // ----------------------------------------------------------
 
   function choose(
     i: number,
@@ -1356,140 +1744,158 @@ function App() {
       return
     }
 
-    setGame(g =>
-      g && g.stage === 'round'
-        ? {
-            ...g,
+    setGame(current => {
+      if (
+        !current ||
+        current.stage !== 'round'
+      ) {
+        return current
+      }
 
-            actions: g.actions.map(
-              (a, j) =>
-                i === j
-                  ? {
-                      ...blank(),
-                      choice,
-                    }
-                  : a
-            ),
-          }
-        : g
-    )
+      return {
+        ...current,
+
+        actions: current.actions.map(
+          (action, j) =>
+            i === j
+              ? {
+                  ...blank(),
+                  choice,
+                }
+              : action
+        ),
+      }
+    })
   }
 
+  // ----------------------------------------------------------
   // Update catch
+  // ----------------------------------------------------------
 
   function catchChange(
     i: number,
     species: Species,
     delta: number
   ) {
-    setGame(g => {
+    setGame(current => {
       if (
-        !g ||
-        g.stage !== 'round'
+        !current ||
+        current.stage !== 'round'
       ) {
-        return g
+        return current
       }
 
-      const a = g.actions[i]
+      const action =
+        current.actions[i]
 
       if (
-        a.arrested ||
+        action.arrested ||
         (
-          a.choice !== 'nearby' &&
-          a.choice !== 'distant'
+          action.choice !== 'nearby' &&
+          action.choice !== 'distant'
         ) ||
         (
-          a.choice === 'nearby' &&
+          action.choice === 'nearby' &&
           species === 'hog'
         ) ||
         (
-          a.choice === 'distant' &&
+          action.choice === 'distant' &&
           species === 'blue'
         ) ||
         (
           delta > 0 &&
-          caught(a) >= g.drawsPerHunt
+          caught(action) >=
+            current.drawsPerHunt
         ) ||
         (
           delta < 0 &&
-          a[species] <= 0
+          action[species] <= 0
         )
       ) {
-        return g
+        return current
       }
 
-      const actions = g.actions.map(
-        (item, j) =>
-          j === i
-            ? {
-                ...item,
-                [species]:
-                  item[species] + delta,
-              }
-            : item
-      )
+      const actions =
+        current.actions.map(
+          (item, j) =>
+            j === i
+              ? {
+                  ...item,
+                  [species]:
+                    item[species] + delta,
+                }
+              : item
+        )
 
-      const remain = actions.reduce(
-        subtract,
-        { ...g.population }
-      )
+      const remaining =
+        actions.reduce(
+          subtract,
+          { ...current.population }
+        )
 
       if (
-        Object.values(remain).some(
-          x => x < 0
+        Object.values(remaining).some(
+          n => n < 0
         )
       ) {
-        return g
+        return current
       }
 
       return {
-        ...g,
+        ...current,
         actions,
       }
     })
   }
 
+  // ----------------------------------------------------------
   // PAM arrest
+  // ----------------------------------------------------------
 
   function toggleArrest(i: number) {
-    setGame(g =>
-      g &&
-      g.stage === 'round' &&
-      g.scenario === 'PAM'
-        ? {
-            ...g,
+    setGame(current => {
+      if (
+        !current ||
+        current.stage !== 'round' ||
+        current.scenario !== 'PAM'
+      ) {
+        return current
+      }
 
-            actions: g.actions.map(
-              (a, j) =>
-                i === j &&
-                a.choice === 'distant'
-                  ? {
-                      ...a,
-                      arrested: !a.arrested,
-                      blue: 0,
-                      red: 0,
-                      hog: 0,
-                    }
-                  : a
-            ),
-          }
-        : g
-    )
+      return {
+        ...current,
+
+        actions: current.actions.map(
+          (action, j) =>
+            i === j &&
+            action.choice === 'distant'
+              ? {
+                  ...action,
+
+                  arrested:
+                    !action.arrested,
+
+                  blue: 0,
+                  red: 0,
+                  hog: 0,
+                }
+              : action
+        ),
+      }
+    })
   }
 
-  // ======================================
+  // ----------------------------------------------------------
   // Confirm round
-  //
-  // FIX:
-  // Use the same affordability rule
-  // as the choice buttons.
-  // ======================================
+  // ----------------------------------------------------------
 
   function confirmRound() {
     if (
       !game ||
       game.stage !== 'round' ||
-      game.actions.some(a => !a.choice)
+      game.actions.some(
+        action => !action.choice
+      )
     ) {
       return
     }
@@ -1499,8 +1905,11 @@ function App() {
       i < game.players;
       i++
     ) {
+      const action =
+        game.actions[i]
+
       if (
-        game.actions[i].choice === 'distant' &&
+        action.choice === 'distant' &&
         cannotAffordDistantHunting(
           game.cash[i],
           game.travelCost
@@ -1509,36 +1918,44 @@ function App() {
         window.alert(
           `Player ${i + 1} cannot afford distant hunting.`
         )
+
         return
       }
 
       if (
-        caught(game.actions[i]) >
+        caught(action) >
         game.drawsPerHunt
       ) {
+        window.alert(
+          'Too many animals caught.'
+        )
+
         return
       }
     }
 
-    const remaining = game.actions.reduce(
-      subtract,
-      { ...game.population }
-    )
+    const remaining =
+      game.actions.reduce(
+        subtract,
+        { ...game.population }
+      )
 
     if (
       Object.values(remaining).some(
-        x => x < 0
+        n => n < 0
       )
     ) {
       window.alert(
-        'Catches exceed the remaining population.'
+        'Catches exceed remaining populations.'
       )
+
       return
     }
 
     const cash = game.cash.map(
-      (v, i) =>
-        v + actionCash(game.actions[i], game)
+      (balance, i) =>
+        balance +
+        actionCash(game.actions[i], game)
     )
 
     const records = [
@@ -1546,8 +1963,9 @@ function App() {
 
       {
         round: game.round,
+
         actions: game.actions.map(
-          a => ({ ...a })
+          action => ({ ...action })
         ),
       },
     ]
@@ -1557,19 +1975,20 @@ function App() {
 
     setGame({
       ...game,
+
       records,
+
       cash,
+
       population: remaining,
 
-      stage:
-        yearEnd
-          ? 'settlement'
-          : 'round',
+      stage: yearEnd
+        ? 'settlement'
+        : 'round',
 
-      round:
-        yearEnd
-          ? game.round
-          : game.round + 1,
+      round: yearEnd
+        ? game.round
+        : game.round + 1,
 
       actions: blanks(game.players),
     })
@@ -1577,7 +1996,9 @@ function App() {
     window.scrollTo(0, 0)
   }
 
-  // Confirm food settlement
+  // ----------------------------------------------------------
+  // Confirm annual food settlement
+  // ----------------------------------------------------------
 
   function confirmSettlement() {
     if (
@@ -1592,7 +2013,9 @@ function App() {
     setGame({
       ...game,
 
-      cash: rows.map(r => r.cash),
+      cash: rows.map(
+        row => row.cash
+      ),
 
       financialHistory: [
         ...game.financialHistory,
@@ -1605,7 +2028,9 @@ function App() {
     window.scrollTo(0, 0)
   }
 
+  // ----------------------------------------------------------
   // Confirm annual regeneration
+  // ----------------------------------------------------------
 
   function confirmRegeneration() {
     if (
@@ -1615,13 +2040,14 @@ function App() {
       return
     }
 
-    const p = add(
+    const increase = growth(
       game.population,
+      game.regenerationRate
+    )
 
-      grow(
-        game.population,
-        game.regenerationRate
-      )
+    const next = addPopulations(
+      game.population,
+      increase
     )
 
     const finished =
@@ -1630,7 +2056,7 @@ function App() {
     setGame({
       ...game,
 
-      population: p,
+      population: next,
 
       history: [
         ...game.history,
@@ -1638,19 +2064,18 @@ function App() {
         {
           year:
             game.round / 4 + 1,
-          population: p,
+
+          population: next,
         },
       ],
 
-      stage:
-        finished
-          ? 'finished'
-          : 'round',
+      stage: finished
+        ? 'finished'
+        : 'round',
 
-      round:
-        finished
-          ? game.round
-          : game.round + 1,
+      round: finished
+        ? game.round
+        : game.round + 1,
 
       actions: blanks(game.players),
     })
@@ -1658,12 +2083,19 @@ function App() {
     window.scrollTo(0, 0)
   }
 
+  // ----------------------------------------------------------
   // Edit previous round
+  // ----------------------------------------------------------
 
   function previousRound() {
     if (
       !game ||
-      !game.records.length ||
+      !game.records.length
+    ) {
+      return
+    }
+
+    if (
       !window.confirm(
         'Edit the last confirmed round?'
       )
@@ -1679,40 +2111,53 @@ function App() {
     const year =
       Math.ceil(last.round / 4)
 
-    const history = game.history.filter(
-      h => h.year <= year
-    )
+    const history =
+      game.history.filter(
+        record => record.year <= year
+      )
 
-    const initial = history.find(
-      h => h.year === year
-    )?.population
+    const yearStart =
+      history.find(
+        record => record.year === year
+      )?.population
 
-    if (!initial) {
+    if (!yearStart) {
       return
     }
 
-    let p = { ...initial }
+    let population = {
+      ...yearStart,
+    }
 
     const records =
       game.records.slice(0, -1)
 
-    for (
-      const r of records.filter(
-        r =>
-          Math.ceil(r.round / 4) === year
+    const recordsThisYear =
+      records.filter(
+        record =>
+          Math.ceil(record.round / 4) ===
+          year
       )
+
+    for (
+      const record of recordsThisYear
     ) {
-      for (const a of r.actions) {
-        p = subtract(p, a)
+      for (
+        const action of record.actions
+      ) {
+        population = subtract(
+          population,
+          action
+        )
       }
     }
 
     const financialHistory =
       game.financialHistory.filter(
-        f => f.year < year
+        record => record.year < year
       )
 
-    const { cash } = replay(
+    const reconstructed = replay(
       game,
       records,
       financialHistory
@@ -1724,21 +2169,28 @@ function App() {
       round: last.round,
 
       actions: last.actions.map(
-        a => ({ ...a })
+        action => ({ ...action })
       ),
 
       records,
-      population: p,
+
+      population,
+
       history,
-      cash,
+
+      cash: reconstructed.cash,
+
       financialHistory,
+
       stage: 'round',
     })
 
     window.scrollTo(0, 0)
   }
 
+  // ----------------------------------------------------------
   // Delete game
+  // ----------------------------------------------------------
 
   function reset() {
     if (
@@ -1750,10 +2202,13 @@ function App() {
     }
 
     resetSettings()
+
     setGame(null)
   }
 
+  // ----------------------------------------------------------
   // Dropdown helper
+  // ----------------------------------------------------------
 
   const select = (
     id: string,
@@ -1771,8 +2226,10 @@ function App() {
       <select
         id={id}
         value={value}
-        onChange={e =>
-          change(Number(e.target.value))
+        onChange={event =>
+          change(
+            Number(event.target.value)
+          )
         }
       >
         {values.map(n => (
@@ -1788,15 +2245,17 @@ function App() {
     </>
   )
 
-  // ======================================
-  // New Game Screen
-  // ======================================
+  // ==========================================================
+  // NEW GAME SCREEN
+  // ==========================================================
 
   if (!game) {
     return (
       <main className="app">
         <header className="header">
-          <h1>Hunting Serious Game</h1>
+          <h1>
+            Hunting Serious Game
+          </h1>
 
           <p>
             Game management and wildlife monitoring
@@ -1813,8 +2272,10 @@ function App() {
           <input
             id="game-id"
             value={id}
-            onChange={e =>
-              setId(e.target.value)
+            onChange={event =>
+              setId(
+                event.target.value
+              )
             }
           />
 
@@ -1825,9 +2286,9 @@ function App() {
           <select
             id="scenario"
             value={scenario}
-            onChange={e =>
+            onChange={event =>
               setScenario(
-                e.target.value as Scenario
+                event.target.value as Scenario
               )
             }
           >
@@ -1850,13 +2311,7 @@ function App() {
               'Fine amount (FCFA)',
               fine,
               setFine,
-              [
-                25000,
-                50000,
-                100000,
-                200000,
-                300000,
-              ],
+              FINE_OPTIONS,
               ' FCFA'
             )}
 
@@ -1870,9 +2325,9 @@ function App() {
             min="2"
             max="10"
             value={players}
-            onChange={e =>
+            onChange={event =>
               setPlayers(
-                Number(e.target.value)
+                Number(event.target.value)
               )
             }
           />
@@ -1882,10 +2337,7 @@ function App() {
             'Initial cash (FCFA)',
             initialMoney,
             setInitialMoney,
-            Array.from(
-              { length: 11 },
-              (_, i) => i * 10000
-            ),
+            CASH_OPTIONS,
             ' FCFA'
           )}
 
@@ -1894,10 +2346,7 @@ function App() {
             'Distant hunting cost (FCFA)',
             travelCost,
             setTravelCost,
-            Array.from(
-              { length: 6 },
-              (_, i) => i * 10000
-            ),
+            TRAVEL_OPTIONS,
             ' FCFA'
           )}
 
@@ -1906,14 +2355,13 @@ function App() {
             'Number of rounds',
             rounds,
             setRounds,
-            Array.from(
-              { length: 10 },
-              (_, i) => (i + 1) * 4
-            ),
+            ROUND_OPTIONS,
             ' rounds'
           )}
 
-          <h3>Game Rules</h3>
+          <h3>
+            Game Rules
+          </h3>
 
           {select(
             'regen',
@@ -1938,7 +2386,7 @@ function App() {
             'Draws per hunt',
             drawsPerHunt,
             setDrawsPerHunt,
-            [1, 2, 3, 4, 5],
+            DRAW_OPTIONS,
             ' draws'
           )}
 
@@ -1948,11 +2396,13 @@ function App() {
           </h3>
 
           <p className="muted">
-            Select the initial number of
-            each token type.
+            Select the initial number
+            of each token type.
           </p>
 
-          <h4>Nearby Area</h4>
+          <h4>
+            Nearby Area
+          </h4>
 
           {select(
             'blue',
@@ -1993,7 +2443,9 @@ function App() {
             ' tokens'
           )}
 
-          <h4>Distant Area</h4>
+          <h4>
+            Distant Area
+          </h4>
 
           {select(
             'farred',
@@ -2036,23 +2488,59 @@ function App() {
 
           <div className="settings">
             <p>
-              <strong>Food price:</strong>
-              {' '}3,000 FCFA per point
+              <strong>
+                Blue duiker:
+              </strong>
+              {' '}
+              10 points = 10,000 FCFA
             </p>
 
             <p>
-              <strong>Part-time job:</strong>
-              {' '}30,000 FCFA per round
+              <strong>
+                Red duiker:
+              </strong>
+              {' '}
+              20 points = 20,000 FCFA
             </p>
 
             <p>
-              <strong>Negative balance:</strong>
-              {' '}Allowed; no bank loans
+              <strong>
+                Red river hog:
+              </strong>
+              {' '}
+              30 points = 30,000 FCFA
             </p>
 
             <p>
-              <strong>Distant hunting:</strong>
-              {' '}No cash restriction when
+              <strong>
+                Food price:
+              </strong>
+              {' '}
+              1,000 FCFA per point
+            </p>
+
+            <p>
+              <strong>
+                No Hunting:
+              </strong>
+              {' '}
+              0 FCFA income
+            </p>
+
+            <p>
+              <strong>
+                Negative balance:
+              </strong>
+              {' '}
+              Allowed; no bank loans
+            </p>
+
+            <p>
+              <strong>
+                Distant hunting:
+              </strong>
+              {' '}
+              No cash restriction when
               travel cost is 0 FCFA
             </p>
           </div>
@@ -2068,25 +2556,29 @@ function App() {
     )
   }
 
-  // ======================================
+  // ==========================================================
   // Shared UI
-  // ======================================
+  // ==========================================================
 
   const header = (
     <header className="header">
-      <h1>HSG Game Manager</h1>
+      <h1>
+        HSG Game Manager
+      </h1>
 
       <p>
-        Game: {game.gameId} — {game.scenario}
+        Game: {game.gameId}
+        {' — '}
+        {game.scenario}
       </p>
     </header>
   )
 
   const monitor = (
-    h: PopulationRecord[]
+    history: PopulationRecord[]
   ) => (
     <Monitoring
-      history={h}
+      history={history}
       years={game.rounds / 4}
     />
   )
@@ -2097,23 +2589,27 @@ function App() {
         <strong>
           Failure tokens — Nearby:
         </strong>
-        {' '}{game.failureTokens.nearby}
+        {' '}
+        {game.failureTokens.nearby}
       </p>
 
       <p>
         <strong>
           Failure tokens — Distant:
         </strong>
-        {' '}{game.failureTokens.distant}
+        {' '}
+        {game.failureTokens.distant}
       </p>
     </div>
   )
 
-  // ======================================
-  // Annual Food Settlement
-  // ======================================
+  // ==========================================================
+  // ANNUAL FOOD SETTLEMENT
+  // ==========================================================
 
-  if (game.stage === 'settlement') {
+  if (
+    game.stage === 'settlement'
+  ) {
     const rows = settlement(game)
 
     return (
@@ -2129,12 +2625,19 @@ function App() {
 
           <p>
             Each player requires
-            {' '}{game.foodRequirement}
-            {' '}food points.
+            {' '}
+            {game.foodRequirement}
+            {' '}
+            food points.
             Each food point is worth
-            {' '}3,000 FCFA.
-            Negative cash balances are allowed;
-            no loans are issued.
+            {' '}
+            {fmt(FOOD_PRICE)}.
+          </p>
+
+          <p className="muted">
+            Negative cash balances are
+            allowed. No bank loans
+            are issued.
           </p>
 
           <div className="table-container">
@@ -2142,34 +2645,50 @@ function App() {
               <thead>
                 <tr>
                   <th>Player</th>
+
                   <th>Food</th>
-                  <th>Food transaction</th>
-                  <th>Cash before</th>
-                  <th>Cash after</th>
+
+                  <th>
+                    Food transaction
+                  </th>
+
+                  <th>
+                    Cash before
+                  </th>
+
+                  <th>
+                    Cash after
+                  </th>
                 </tr>
               </thead>
 
               <tbody>
-                {rows.map(r => (
-                  <tr key={r.player}>
+                {rows.map(row => (
+                  <tr key={row.player}>
                     <td>
-                      Player {r.player}
+                      Player {row.player}
                     </td>
 
-                    <td>{r.food}</td>
-
                     <td>
-                      {fmt(r.foodTransaction)}
+                      {row.food}
                     </td>
 
                     <td>
                       {fmt(
-                        game.cash[r.player - 1]
+                        row.foodTransaction
                       )}
                     </td>
 
                     <td>
-                      {fmt(r.cash)}
+                      {fmt(
+                        game.cash[
+                          row.player - 1
+                        ]
+                      )}
+                    </td>
+
+                    <td>
+                      {fmt(row.cash)}
                     </td>
                   </tr>
                 ))}
@@ -2195,17 +2714,19 @@ function App() {
     )
   }
 
-  // ======================================
-  // Annual Regeneration
-  // ======================================
+  // ==========================================================
+  // ANNUAL REGENERATION
+  // ==========================================================
 
-  if (game.stage === 'regeneration') {
-    const increase = grow(
+  if (
+    game.stage === 'regeneration'
+  ) {
+    const increase = growth(
       game.population,
       game.regenerationRate
     )
 
-    const next = add(
+    const next = addPopulations(
       game.population,
       increase
     )
@@ -2224,11 +2745,15 @@ function App() {
 
           <p>
             Annual regeneration:
-            {' '}{game.regenerationRate}%
-            {' '}(rounded down)
+            {' '}
+            {game.regenerationRate}%
+            {' '}
+            (rounded down)
           </p>
 
-          <h3>Animals to Add</h3>
+          <h3>
+            Animals to Add
+          </h3>
 
           <PopulationTable
             population={game.population}
@@ -2277,11 +2802,13 @@ function App() {
     )
   }
 
-  // ======================================
-  // Finished Game Screen
-  // ======================================
+  // ==========================================================
+  // FINISHED GAME SCREEN
+  // ==========================================================
 
-  if (game.stage === 'finished') {
+  if (
+    game.stage === 'finished'
+  ) {
     const negatives = replay(
       game,
       game.records,
@@ -2293,75 +2820,96 @@ function App() {
         {header}
 
         <section className="card">
-          <h2>Game Completed</h2>
+          <h2>
+            Game Completed
+          </h2>
 
           {failureInfo}
 
           {monitor(game.history)}
 
-          <h3>Final Finances</h3>
+          <h3>
+            Final Finances
+          </h3>
 
           <div className="table-container">
             <table className="population-table">
               <thead>
                 <tr>
                   <th>Player</th>
-                  <th>Final cash</th>
-                  <th>Ever negative?</th>
+
+                  <th>
+                    Final cash
+                  </th>
+
+                  <th>
+                    Ever negative?
+                  </th>
                 </tr>
               </thead>
 
               <tbody>
-                {game.cash.map((n, i) => (
-                  <tr key={i}>
-                    <td>
-                      Player {i + 1}
-                    </td>
+                {game.cash.map(
+                  (balance, i) => (
+                    <tr key={i}>
+                      <td>
+                        Player {i + 1}
+                      </td>
 
-                    <td>
-                      {fmt(n)}
-                    </td>
+                      <td>
+                        {fmt(balance)}
+                      </td>
 
-                    <td>
-                      {negatives[i]
-                        ? 'Yes'
-                        : 'No'}
-                    </td>
-                  </tr>
-                ))}
+                      <td>
+                        {negatives[i]
+                          ? 'Yes'
+                          : 'No'}
+                      </td>
+                    </tr>
+                  )
+                )}
               </tbody>
             </table>
           </div>
         </section>
 
-        <GiftPanel game={game} />
+        <GiftPanel
+          game={game}
+        />
 
         <section className="card">
-          <h2>Round History</h2>
+          <h2>
+            Round History
+          </h2>
 
-          {game.records.map(r => (
+          {game.records.map(record => (
             <div
               className="player-card"
-              key={r.round}
+              key={record.round}
             >
               <h4>
-                Round {r.round}
+                Round {record.round}
               </h4>
 
-              {r.actions.map((a, i) => (
-                <p key={i}>
-                  Player {i + 1}:
-                  {' '}{a.choice}
-
-                  {a.arrested
-                    ? ' — Arrested'
-                    : (
-                      ` — Blue: ${a.blue}, ` +
-                      `Red: ${a.red}, ` +
-                      `Hog: ${a.hog}`
+              {record.actions.map(
+                (action, i) => (
+                  <p key={i}>
+                    Player {i + 1}:
+                    {' '}
+                    {choiceLabel(
+                      action.choice
                     )}
-                </p>
-              ))}
+
+                    {action.arrested
+                      ? ' — Arrested'
+                      : (
+                        ` — Blue: ${action.blue}, ` +
+                        `Red: ${action.red}, ` +
+                        `Hog: ${action.hog}`
+                      )}
+                  </p>
+                )
+              )}
             </div>
           ))}
 
@@ -2373,7 +2921,9 @@ function App() {
           </button>
         </section>
 
-        <ExportPanel game={game} />
+        <ExportPanel
+          game={game}
+        />
 
         <section className="card">
           <button
@@ -2387,18 +2937,20 @@ function App() {
     )
   }
 
-  // ======================================
-  // Round Input Screen
-  // ======================================
+  // ==========================================================
+  // ROUND INPUT SCREEN
+  // ==========================================================
 
-  const remaining = game.actions.reduce(
-    subtract,
-    { ...game.population }
-  )
+  const remaining =
+    game.actions.reduce(
+      subtract,
+      { ...game.population }
+    )
 
-  const ready = game.actions.every(
-    a => !!a.choice
-  )
+  const ready =
+    game.actions.every(
+      action => !!action.choice
+    )
 
   return (
     <main className="app">
@@ -2421,232 +2973,285 @@ function App() {
           </p>
 
           <p>
-            <strong>Players:</strong>
-            {' '}{game.players}
+            <strong>
+              Players:
+            </strong>
+            {' '}
+            {game.players}
           </p>
 
           <p>
             <strong>
               Distant hunting cost:
             </strong>
-            {' '}{fmt(game.travelCost)}
+            {' '}
+            {fmt(game.travelCost)}
           </p>
 
           <p>
             <strong>
               Draws per hunt:
             </strong>
-            {' '}{game.drawsPerHunt}
+            {' '}
+            {game.drawsPerHunt}
+          </p>
+
+          <p>
+            <strong>
+              No Hunting income:
+            </strong>
+            {' '}
+            {fmt(NO_HUNTING_INCOME)}
           </p>
 
           {game.scenario === 'PAM' && (
             <p>
-              <strong>PAM Fine:</strong>
-              {' '}{fmt(game.fine)}
+              <strong>
+                PAM Fine:
+              </strong>
+              {' '}
+              {fmt(game.fine)}
             </p>
           )}
         </div>
 
-        {game.actions.map((a, i) => (
-          <div
-            className="player-card"
-            key={i}
-          >
-            <h3>
-              Player {i + 1}
-            </h3>
+        {game.actions.map(
+          (action, i) => (
+            <div
+              className="player-card"
+              key={i}
+            >
+              <h3>
+                Player {i + 1}
+              </h3>
 
-            <p className="muted">
-              Current cash:
-              {' '}{fmt(game.cash[i])}
-            </p>
-
-            <div className="choice-buttons">
-              {(
-                [
-                  [
-                    'nearby',
-                    'Nearby Hunting',
-                  ],
-                  [
-                    'distant',
-                    'Distant Hunting',
-                  ],
-                  [
-                    'agriculture',
-                    'Part-time Job',
-                  ],
-                ] as const
-              ).map(([choice, label]) => (
-                <button
-                  key={choice}
-                  className={
-                    a.choice === choice
-                      ? 'selected'
-                      : ''
-                  }
-
-                  // FIX:
-                  // Disable only when
-                  // positive travel cost
-                  // exceeds available cash.
-
-                  disabled={
-                    choice === 'distant' &&
-                    cannotAffordDistantHunting(
-                      game.cash[i],
-                      game.travelCost
-                    )
-                  }
-
-                  onClick={() =>
-                    choose(i, choice)
-                  }
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-
-            {cannotAffordDistantHunting(
-              game.cash[i],
-              game.travelCost
-            ) && (
-              <p
-                className="muted"
-                style={{
-                  color: '#b45309',
-                  fontWeight: 600,
-                }}
-              >
-                Insufficient cash for distant hunting.
-                <br />
-                Required: {fmt(game.travelCost)}
-                <br />
-                Available: {fmt(game.cash[i])}
+              <p className="muted">
+                Current cash:
+                {' '}
+                {fmt(game.cash[i])}
               </p>
-            )}
 
-            {game.scenario === 'PAM' &&
-              a.choice === 'distant' && (
-                <div className="arrest-section">
-                  <button
-                    className={
-                      `arrest-button ${
-                        a.arrested
-                          ? 'arrested'
-                          : ''
-                      }`
-                    }
-                    onClick={() =>
-                      toggleArrest(i)
-                    }
-                  >
-                    {a.arrested
-                      ? '✓ Arrested'
-                      : 'Arrested by Authorities?'}
-                  </button>
-
-                  {a.arrested && (
-                    <p className="arrest-message">
-                      Fine: {fmt(game.fine)}
-                      <br />
-                      No hunting — No catch
-                    </p>
-                  )}
-                </div>
-              )}
-
-            {(a.choice === 'nearby' ||
-              a.choice === 'distant') &&
-              !a.arrested && (
-                <div className="catch-section">
-                  <h4>Animals Caught</h4>
-
-                  {(
+              <div className="choice-buttons">
+                {(
+                  [
                     [
-                      [
-                        'blue',
-                        'Blue duiker',
-                      ],
-                      [
-                        'red',
-                        'Red duiker',
-                      ],
-                      [
-                        'hog',
-                        'Red river hog',
-                      ],
-                    ] as const
+                      'nearby',
+                      'Nearby Hunting',
+                    ],
+                    [
+                      'distant',
+                      'Distant Hunting',
+                    ],
+                    [
+                      'noHunting',
+                      'No Hunting',
+                    ],
+                  ] as const
+                ).map(
+                  ([choice, label]) => (
+                    <button
+                      key={choice}
+                      className={
+                        action.choice ===
+                        choice
+                          ? 'selected'
+                          : ''
+                      }
+
+                      disabled={
+                        choice ===
+                          'distant' &&
+                        cannotAffordDistantHunting(
+                          game.cash[i],
+                          game.travelCost
+                        )
+                      }
+
+                      onClick={() =>
+                        choose(
+                          i,
+                          choice
+                        )
+                      }
+                    >
+                      {label}
+                    </button>
                   )
-                    .filter(([s]) =>
-                      a.choice === 'nearby'
-                        ? s !== 'hog'
-                        : s !== 'blue'
-                    )
-                    .map(([s, label]) => (
-                      <div
-                        className="animal-row"
-                        key={s}
-                      >
-                        <span>
-                          {label}
-                        </span>
+                )}
+              </div>
 
-                        <div className="counter">
-                          <button
-                            onClick={() =>
-                              catchChange(
-                                i,
-                                s,
-                                -1
-                              )
-                            }
-                          >
-                            −
-                          </button>
+              {cannotAffordDistantHunting(
+                game.cash[i],
+                game.travelCost
+              ) && (
+                <p
+                  className="muted"
+                  style={{
+                    color: '#b45309',
+                    fontWeight: 600,
+                  }}
+                >
+                  Insufficient cash for distant hunting.
+                  <br />
 
-                          <strong>
-                            {a[s]}
-                          </strong>
+                  Required:
+                  {' '}
+                  {fmt(game.travelCost)}
+                  <br />
 
-                          <button
-                            disabled={
-                              caught(a) >=
-                              game.drawsPerHunt
-                            }
-                            onClick={() =>
-                              catchChange(
-                                i,
-                                s,
-                                1
-                              )
-                            }
-                          >
-                            +
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-
-                  <p className="muted">
-                    Total:
-                    {' '}{caught(a)}
-                    /{game.drawsPerHunt}
-                  </p>
-                </div>
+                  Available:
+                  {' '}
+                  {fmt(game.cash[i])}
+                </p>
               )}
 
-            <p className="muted">
-              Cash change:
-              {' '}
-              {fmt(actionCash(a, game))}
-              <br />
-              Food points:
-              {' '}{foodPoints(a)}
-            </p>
-          </div>
-        ))}
+              {game.scenario === 'PAM' &&
+                action.choice ===
+                  'distant' && (
+                  <div className="arrest-section">
+                    <button
+                      className={
+                        `arrest-button ${
+                          action.arrested
+                            ? 'arrested'
+                            : ''
+                        }`
+                      }
+
+                      onClick={() =>
+                        toggleArrest(i)
+                      }
+                    >
+                      {action.arrested
+                        ? '✓ Arrested'
+                        : 'Arrested by Authorities?'}
+                    </button>
+
+                    {action.arrested && (
+                      <p className="arrest-message">
+                        Fine:
+                        {' '}
+                        {fmt(game.fine)}
+                        <br />
+
+                        No hunting — No catch
+                      </p>
+                    )}
+                  </div>
+                )}
+
+              {(
+                action.choice ===
+                  'nearby' ||
+                action.choice ===
+                  'distant'
+              ) &&
+                !action.arrested && (
+                  <div className="catch-section">
+                    <h4>
+                      Animals Caught
+                    </h4>
+
+                    {(
+                      [
+                        [
+                          'blue',
+                          'Blue duiker',
+                        ],
+                        [
+                          'red',
+                          'Red duiker',
+                        ],
+                        [
+                          'hog',
+                          'Red river hog',
+                        ],
+                      ] as const
+                    )
+                      .filter(([species]) =>
+                        action.choice ===
+                        'nearby'
+                          ? species !== 'hog'
+                          : species !== 'blue'
+                      )
+                      .map(
+                        ([species, label]) => (
+                          <div
+                            className="animal-row"
+                            key={species}
+                          >
+                            <span>
+                              {label}
+                            </span>
+
+                            <div className="counter">
+                              <button
+                                onClick={() =>
+                                  catchChange(
+                                    i,
+                                    species,
+                                    -1
+                                  )
+                                }
+                              >
+                                −
+                              </button>
+
+                              <strong>
+                                {action[species]}
+                              </strong>
+
+                              <button
+                                disabled={
+                                  caught(
+                                    action
+                                  ) >=
+                                  game.drawsPerHunt
+                                }
+
+                                onClick={() =>
+                                  catchChange(
+                                    i,
+                                    species,
+                                    1
+                                  )
+                                }
+                              >
+                                +
+                              </button>
+                            </div>
+                          </div>
+                        )
+                      )}
+
+                    <p className="muted">
+                      Total:
+                      {' '}
+                      {caught(action)}
+                      /
+                      {game.drawsPerHunt}
+                    </p>
+                  </div>
+                )}
+
+              <p className="muted">
+                Cash change:
+                {' '}
+                {fmt(
+                  actionCash(
+                    action,
+                    game
+                  )
+                )}
+                <br />
+
+                Food points:
+                {' '}
+                {foodPoints(action)}
+              </p>
+            </div>
+          )
+        )}
 
         <button
           className="primary-button"
@@ -2677,19 +3282,26 @@ function App() {
 
         {failureInfo}
 
-        <h3>Current Cash</h3>
+        <h3>
+          Current Cash
+        </h3>
 
-        {game.cash.map((v, i) => (
-          <p key={i}>
-            Player {i + 1}:
-            {' '}{fmt(v)}
-          </p>
-        ))}
+        {game.cash.map(
+          (balance, i) => (
+            <p key={i}>
+              Player {i + 1}:
+              {' '}
+              {fmt(balance)}
+            </p>
+          )
+        )}
 
         <button
           className="secondary-button"
           onClick={() =>
-            setShowGraphs(v => !v)
+            setShowGraphs(
+              current => !current
+            )
           }
         >
           {showGraphs
