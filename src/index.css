@@ -1,0 +1,248 @@
+/* ========================================
+   HSG Game Manager
+   ======================================== */
+
+.app {
+  max-width: 600px;
+  margin: 0 auto;
+  padding: 24px 16px 60px;
+}
+
+/* Header */
+
+.header {
+  text-align: center;
+  margin-bottom: 30px;
+}
+
+.header h1 {
+  color: #176447;
+  font-size: 28px;
+  margin-bottom: 8px;
+}
+
+.header p {
+  color: #66756e;
+  font-size: 14px;
+}
+
+/* Cards */
+
+.card {
+  background: white;
+  border: 1px solid #e0e8e3;
+  border-radius: 16px;
+  padding: 24px;
+  margin-bottom: 20px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04);
+}
+
+.card h2 {
+  color: #244a38;
+  font-size: 20px;
+  margin-top: 0;
+  margin-bottom: 24px;
+}
+
+/* Form fields */
+
+.card label {
+  display: block;
+  margin-top: 18px;
+  margin-bottom: 8px;
+  font-weight: 600;
+  color: #33483b;
+}
+
+.card input,
+.card select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px;
+  border: 1px solid #cbd8cf;
+  border-radius: 8px;
+  font-size: 16px;
+  background: white;
+  color: #222;
+}
+
+/* Settings */
+
+.settings {
+  background: #f2f7f3;
+  padding: 16px;
+  border-radius: 10px;
+  margin-top: 24px;
+  margin-bottom: 24px;
+}
+
+.settings p {
+  margin: 10px 0;
+  font-size: 14px;
+  color: #33483b;
+}
+
+/* Primary button */
+
+.primary-button {
+  width: 100%;
+  padding: 16px;
+  border: none;
+  border-radius: 10px;
+  background: #176447;
+  color: white;
+  font-size: 17px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.primary-button:hover {
+  background: #104b35;
+}
+
+.primary-button:disabled {
+  background: #a9b8ae;
+  cursor: not-allowed;
+}
+
+/* Muted text */
+
+.muted {
+  color: #89958d;
+  font-size: 14px;
+}
+
+/* Player cards */
+
+.player-card {
+  padding: 18px 0;
+  border-bottom: 1px solid #e0e8e3;
+}
+
+.player-card h3 {
+  margin: 0 0 14px;
+  color: #244a38;
+}
+
+/* Choice buttons */
+
+.choice-buttons {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.choice-buttons button {
+  flex: 1 1 130px;
+  padding: 12px 8px;
+  border: 1px solid #cbd8cf;
+  border-radius: 8px;
+  background: #f2f7f3;
+  color: #244a38;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.choice-buttons button.selected {
+  background: #176447;
+  border-color: #176447;
+  color: white;
+}
+
+/* Animal catches */
+
+.catch-section {
+  margin-top: 16px;
+}
+
+.catch-section h4 {
+  margin-bottom: 12px;
+}
+
+.animal-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+}
+
+/* Animal counters */
+
+.counter {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.counter button {
+  width: 38px;
+  height: 38px;
+  border: 1px solid #cbd8cf;
+  border-radius: 8px;
+  background: white;
+  color: #176447;
+  font-size: 22px;
+  cursor: pointer;
+}
+
+.counter strong {
+  min-width: 20px;
+  text-align: center;
+}
+
+/* PAM arrest */
+
+.arrest-section {
+  margin-top: 16px;
+  padding: 14px;
+  background: #fff8f0;
+  border: 1px solid #f0d6ba;
+  border-radius: 10px;
+}
+
+.arrest-button {
+  width: 100%;
+  padding: 14px;
+  border: 2px solid #d97706;
+  border-radius: 8px;
+  background: white;
+  color: #92400e;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.arrest-button.arrested {
+  background: #b91c1c;
+  border-color: #b91c1c;
+  color: white;
+}
+
+.arrest-message {
+  margin: 12px 0 0;
+  color: #991b1b;
+  font-size: 14px;
+  line-height: 1.8;
+  font-weight: 600;
+}
+
+/* Mobile */
+
+@media (max-width: 480px) {
+  .app {
+    padding: 16px 12px 40px;
+  }
+
+  .card {
+    padding: 18px;
+  }
+
+  .header h1 {
+    font-size: 24px;
+  }
+
+  .choice-buttons button {
+    flex-basis: 100%;
+  }
+}
