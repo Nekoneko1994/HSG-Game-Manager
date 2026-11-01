@@ -134,6 +134,24 @@ const wildlifeRows = [
 ] as const
 
 // ========================================
+// Distant hunting affordability
+//
+// FIX:
+// If travel cost is zero, distant hunting
+// is allowed regardless of cash balance.
+//
+// If travel cost is greater than zero,
+// the player must have enough cash.
+// ========================================
+
+function cannotAffordDistantHunting(
+  cash: number,
+  travelCost: number
+): boolean {
+  return travelCost > 0 && cash < travelCost
+}
+
+// ========================================
 // Wildlife population calculations
 // ========================================
 
@@ -184,7 +202,9 @@ function add(
 
 // ========================================
 // Annual food settlement
-// No bank loans or repayments
+//
+// No bank loans or repayments.
+// Negative balances are allowed.
 // ========================================
 
 function settlement(
@@ -359,8 +379,6 @@ function rewards(g: Game) {
     const wildlifeBonus =
       wildlife ? 1 : 0
 
-    // Applied once, even if the player
-    // had negative cash multiple times.
     const negativePenalty =
       negative[i] ? -1 : 0
 
@@ -570,6 +588,10 @@ async function exportExcel(g: Game) {
       [
         'Gift penalty',
         'Minus one if cash was negative at least once',
+      ],
+      [
+        'Distant hunting restriction',
+        'Cash requirement applies only if travel cost is positive',
       ],
     ]
 
@@ -1178,7 +1200,8 @@ function App() {
   const [showGraphs, setShowGraphs] =
     useState(false)
 
-  // v4 is kept separate from old v3 data.
+  // Keep the existing v4 storage key.
+  // Existing game data is preserved.
 
   const [game, setGame] =
     useState<Game | null>(() => {
@@ -1304,7 +1327,13 @@ function App() {
     })
   }
 
+  // ======================================
   // Change player choice
+  //
+  // FIX:
+  // Zero travel cost allows distant
+  // hunting even with negative cash.
+  // ======================================
 
   function choose(
     i: number,
@@ -1319,7 +1348,10 @@ function App() {
 
     if (
       choice === 'distant' &&
-      game.cash[i] < game.travelCost
+      cannotAffordDistantHunting(
+        game.cash[i],
+        game.travelCost
+      )
     ) {
       return
     }
@@ -1445,7 +1477,13 @@ function App() {
     )
   }
 
+  // ======================================
   // Confirm round
+  //
+  // FIX:
+  // Use the same affordability rule
+  // as the choice buttons.
+  // ======================================
 
   function confirmRound() {
     if (
@@ -1463,7 +1501,10 @@ function App() {
     ) {
       if (
         game.actions[i].choice === 'distant' &&
-        game.cash[i] < game.travelCost
+        cannotAffordDistantHunting(
+          game.cash[i],
+          game.travelCost
+        )
       ) {
         window.alert(
           `Player ${i + 1} cannot afford distant hunting.`
@@ -2008,6 +2049,12 @@ function App() {
               <strong>Negative balance:</strong>
               {' '}Allowed; no bank loans
             </p>
+
+            <p>
+              <strong>Distant hunting:</strong>
+              {' '}No cash restriction when
+              travel cost is 0 FCFA
+            </p>
           </div>
 
           <button
@@ -2438,10 +2485,20 @@ function App() {
                       ? 'selected'
                       : ''
                   }
+
+                  // FIX:
+                  // Disable only when
+                  // positive travel cost
+                  // exceeds available cash.
+
                   disabled={
                     choice === 'distant' &&
-                    game.cash[i] < game.travelCost
+                    cannotAffordDistantHunting(
+                      game.cash[i],
+                      game.travelCost
+                    )
                   }
+
                   onClick={() =>
                     choose(i, choice)
                   }
@@ -2451,7 +2508,10 @@ function App() {
               ))}
             </div>
 
-            {game.cash[i] < game.travelCost && (
+            {cannotAffordDistantHunting(
+              game.cash[i],
+              game.travelCost
+            ) && (
               <p
                 className="muted"
                 style={{
